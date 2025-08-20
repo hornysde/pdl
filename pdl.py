@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Annotated, Literal
+
 import asyncio
 
 import aiohttp
@@ -17,6 +19,7 @@ class Endpoint:
 
     site = "https://www.patreon.com"
     current_user = site + "/api/current_user"
+    current_user_with_pledges = site + "/api/current_user?include=pledges"
 
 
 class AuthInfo(pydantic.BaseModel):
@@ -35,6 +38,80 @@ class AuthInfo(pydantic.BaseModel):
 
     def make_header(self) -> dict[str, str]:
         return {"user-agent": self.user_agent}
+
+
+class Campaign(pydantic.BaseModel):
+    """
+    A creator's page/channel for publishing content
+    """
+
+    type: Literal["campaign"]
+    id: str
+
+
+class Reward(pydantic.BaseModel):
+    """
+    Subscription tier offered by a campaign with price and benefits
+    """
+
+    type: Literal["reward"]
+    id: str
+    post_count: Annotated[
+        int,
+        pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "post_count")),
+    ]
+    campaign_id: Annotated[
+        str,
+        pydantic.Field(
+            validation_alias=pydantic.AliasPath(
+                "relationships", "campaign", "data", "id"
+            )
+        ),
+    ]
+
+
+class User(pydantic.BaseModel):
+    """
+    Individual person on Patreon (creator or patron)
+    """
+
+    type: Literal["user"]
+    id: str
+    full_name: str = pydantic.Field(
+        validation_alias=pydantic.AliasPath("attributes", "full_name")
+    )
+    image_url: str = pydantic.Field(
+        validation_alias=pydantic.AliasPath("attributes", "image_url")
+    )
+    pledge_ids: Annotated[
+        list[str],
+        pydantic.Field(
+            validation_alias=pydantic.AliasPath("relationships", "pledges", "data")
+        ),
+    ] = []
+
+    @pydantic.field_validator("pledge_ids", mode="before")
+    @classmethod
+    def _extract_pledge_ids(cls, pledges):
+        return [pledge["id"] for pledge in pledges]
+
+
+class Pledge(pydantic.BaseModel):
+    """
+    Active subscription/payment from a patron to a creator for a specific reward tier
+    """
+
+    type: Literal["pledge"]
+    id: str
+    amount_cents: int = pydantic.Field(
+        validation_alias=pydantic.AliasPath("attributes", "amount_cents")
+    )
+    reward_id: str = pydantic.Field(
+        validation_alias=pydantic.AliasPath("relationships", "reward", "data", "id")
+    )
+    creator_id: str = pydantic.Field(
+        validation_alias=pydantic.AliasPath("relationships", "creator", "data", "id")
+    )
 
 
 class Session:
@@ -77,16 +154,60 @@ class Session:
         return response
 
 
+class Patreon:
+    def __init__(self, auth: AuthInfo):
+        self.session = Session(auth)
+        self.me: User | None = None
+        self.creators: dict[str, User] = {}
+        self.rewards: dict[str, Reward] = {}
+        self.campaigns: dict[str, Campaign] = {}
+
+    async def __aenter__(self):
+        await self.session.create()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        await self.session.close()
+
+    async def login(self):
+        response = await self.session.get(Endpoint.current_user_with_pledges)
+        data = await response.json()
+        # Get current user
+        self.me = User.model_validate(data["data"])
+        # Filter out placeholder entity with id "-1"
+        entities = [entity for entity in data["included"] if entity["id"] != "-1"]
+        # Get entities
+        self.pledges = {
+            entity["id"]: Pledge.model_validate(entity)
+            for entity in entities
+            if entity["type"] == "pledge"
+        }
+        self.creators = {
+            entity["id"]: User.model_validate(entity)
+            for entity in entities
+            if entity["type"] == "user"
+        }
+        self.rewards = {
+            entity["id"]: Reward.model_validate(entity)
+            for entity in entities
+            if entity["type"] == "reward"
+        }
+        self.campaigns = {
+            entity["id"]: Campaign.model_validate(entity)
+            for entity in entities
+            if entity["type"] == "campaign"
+        }
+
+        return self.me
+
+
 async def main():
     config_file_path = "config.json"
     with open(config_file_path, "r") as f:
         auth = AuthInfo.model_validate_json(f.read())
-    session = Session(auth)
-    await session.create()
-    response = await session.get(Endpoint.current_user)
-    print(response.status)
-    print(await response.text())
-    await session.close()
+    async with Patreon(auth) as patreon:
+        user = await patreon.login()
+        print(f"Logged in as {user.full_name}")
 
 
 if __name__ == "__main__":
