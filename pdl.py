@@ -41,18 +41,14 @@ class AuthInfo(pydantic.BaseModel):
 
 
 class Campaign(pydantic.BaseModel):
-    """
-    A creator's page/channel for publishing content
-    """
+    """A creator's page/channel for publishing content."""
 
     type: Literal["campaign"]
     id: str
 
 
 class Reward(pydantic.BaseModel):
-    """
-    Subscription tier offered by a campaign with price and benefits
-    """
+    """Subscription tier offered by a campaign with price and benefits."""
 
     type: Literal["reward"]
     id: str
@@ -71,9 +67,7 @@ class Reward(pydantic.BaseModel):
 
 
 class User(pydantic.BaseModel):
-    """
-    Individual person on Patreon (creator or patron)
-    """
+    """Individual person on Patreon (creator or patron)."""
 
     type: Literal["user"]
     id: str
@@ -97,9 +91,7 @@ class User(pydantic.BaseModel):
 
 
 class Pledge(pydantic.BaseModel):
-    """
-    Active subscription/payment from a patron to a creator for a specific reward tier
-    """
+    """Active subscription/payment from a patron to a creator for a specific reward tier."""
 
     type: Literal["pledge"]
     id: str
@@ -237,7 +229,7 @@ class Patreon:
         return pledges
 
 
-async def main():
+async def async_main():
     config_file_path = "config.json"
     with open(config_file_path, "r") as f:
         auth = AuthInfo.model_validate_json(f.read())
@@ -249,5 +241,10 @@ async def main():
             print(f"${pledge.amount_cent / 100.0:>7.2f} {pledge.creator_name}")
 
 
+def main():
+    """pdl command entry point."""
+    asyncio.run(async_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

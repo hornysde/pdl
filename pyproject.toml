@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdl"
+version = "0.1.0"
+description = "Brutally simple, lighting fast Patreon downloader"
+authors = [{name = "hornysde", email = "hornysde@proton.me"}]
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+
+dependencies = [
+    "aiohttp",
+    "pydantic",
+    "tenacity",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pip-tools",
+    "ruff",
+    "mypy",
+]
+
+[project.scripts]
+pdl = "pdl:main"
