@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
 import asyncio
@@ -18,7 +19,6 @@ class Endpoint:
         return format
 
     site = "https://www.patreon.com"
-    current_user = site + "/api/current_user"
     current_user_with_pledges = site + "/api/current_user?include=pledges"
 
 
@@ -155,9 +155,25 @@ class Session:
 
 
 class Patreon:
+    @dataclass
+    class Pledge:
+        pledge: Pledge
+        reward: Reward
+        creator: User
+        campaign: Campaign
+
+        @property
+        def creator_name(self) -> str:
+            return self.creator.full_name
+
+        @property
+        def amount_cent(self) -> int:
+            return self.pledge.amount_cents
+
     def __init__(self, auth: AuthInfo):
         self.session = Session(auth)
         self.me: User | None = None
+        self.pledges: dict[str, Pledge] = {}
         self.creators: dict[str, User] = {}
         self.rewards: dict[str, Reward] = {}
         self.campaigns: dict[str, Campaign] = {}
@@ -176,7 +192,7 @@ class Patreon:
         self.me = User.model_validate(data["data"])
         # Filter out placeholder entity with id "-1"
         entities = [entity for entity in data["included"] if entity["id"] != "-1"]
-        # Get entities
+        # Parse all included entities (not all are relevant to logged in user)
         self.pledges = {
             entity["id"]: Pledge.model_validate(entity)
             for entity in entities
@@ -200,6 +216,26 @@ class Patreon:
 
         return self.me
 
+    def get_pledges(self) -> list[Patreon.Pledge]:
+        if self.me is None:
+            raise ValueError("Not logged in, call login() first")
+
+        pledges = []
+        for pledge_id in self.me.pledge_ids:
+            pledge = self.pledges[pledge_id]
+            reward = self.rewards[pledge.reward_id]
+            creator = self.creators[pledge.creator_id]
+            campaign = self.campaigns[reward.campaign_id]
+            pledges.append(
+                Patreon.Pledge(
+                    pledge=pledge,
+                    reward=reward,
+                    creator=creator,
+                    campaign=campaign,
+                )
+            )
+        return pledges
+
 
 async def main():
     config_file_path = "config.json"
@@ -208,6 +244,9 @@ async def main():
     async with Patreon(auth) as patreon:
         user = await patreon.login()
         print(f"Logged in as {user.full_name}")
+        print("Subscribed to:")
+        for pledge in patreon.get_pledges():
+            print(f"${pledge.amount_cent / 100.0:>7.2f} {pledge.creator_name}")
 
 
 if __name__ == "__main__":
