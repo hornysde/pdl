@@ -75,12 +75,14 @@ class User(pydantic.BaseModel):
 
     type: Literal["user"]
     id: str
-    full_name: str = pydantic.Field(
-        validation_alias=pydantic.AliasPath("attributes", "full_name")
-    )
-    image_url: str = pydantic.Field(
-        validation_alias=pydantic.AliasPath("attributes", "image_url")
-    )
+    full_name: Annotated[
+        str,
+        pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "full_name")),
+    ]
+    image_url: Annotated[
+        str,
+        pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "image_url")),
+    ]
     pledge_ids: Annotated[
         list[str],
         pydantic.Field(
@@ -99,18 +101,32 @@ class Pledge(pydantic.BaseModel):
 
     type: Literal["pledge"]
     id: str
-    amount_cents: int = pydantic.Field(
-        validation_alias=pydantic.AliasPath("attributes", "amount_cents")
-    )
-    patron_id: str = pydantic.Field(
-        validation_alias=pydantic.AliasPath("relationships", "patron", "data", "id")
-    )
-    reward_id: str = pydantic.Field(
-        validation_alias=pydantic.AliasPath("relationships", "reward", "data", "id")
-    )
-    creator_id: str = pydantic.Field(
-        validation_alias=pydantic.AliasPath("relationships", "creator", "data", "id")
-    )
+    amount_cents: Annotated[
+        int,
+        pydantic.Field(
+            validation_alias=pydantic.AliasPath("attributes", "amount_cents")
+        ),
+    ]
+    patron_id: Annotated[
+        str,
+        pydantic.Field(
+            validation_alias=pydantic.AliasPath("relationships", "patron", "data", "id")
+        ),
+    ]
+    reward_id: Annotated[
+        str,
+        pydantic.Field(
+            validation_alias=pydantic.AliasPath("relationships", "reward", "data", "id")
+        ),
+    ]
+    creator_id: Annotated[
+        str,
+        pydantic.Field(
+            validation_alias=pydantic.AliasPath(
+                "relationships", "creator", "data", "id"
+            )
+        ),
+    ]
 
 
 class Post(pydantic.BaseModel):
@@ -118,9 +134,17 @@ class Post(pydantic.BaseModel):
     type: Literal["post"]
     # Strict parsing to surface any unexpected post types. New types need screening to avoid missing any downloadable.
     # If you encounter crash here, please open an issue. Remove this line to suppress the error.
-    post_type: Literal[
-        "link", "text_only", "image_file", "video_external_file", "video_embed", "poll"
-    ] = pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "post_type"))
+    post_type: Annotated[
+        Literal[
+            "link",
+            "text_only",
+            "image_file",
+            "video_external_file",
+            "video_embed",
+            "poll",
+        ],
+        pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "post_type")),
+    ]
     # `link` and `video_embed` posts have embed url.
     embed_url: Annotated[
         str | None,
