@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated, Literal
+from typing import Annotated, AsyncGenerator, Literal, Tuple
 
 import asyncio
 
@@ -20,6 +20,10 @@ class Endpoint:
 
     site = "https://www.patreon.com"
     current_user_with_pledges = site + "/api/current_user?include=pledges"
+    posts = _formatted(
+        site
+        + "/api/posts?filter[campaign_id]={campaign_id}&filter[accessible_by_user_id]={patron_id}&include=attachments,attachments_media,media"
+    )
 
 
 class AuthInfo(pydantic.BaseModel):
@@ -98,12 +102,59 @@ class Pledge(pydantic.BaseModel):
     amount_cents: int = pydantic.Field(
         validation_alias=pydantic.AliasPath("attributes", "amount_cents")
     )
+    patron_id: str = pydantic.Field(
+        validation_alias=pydantic.AliasPath("relationships", "patron", "data", "id")
+    )
     reward_id: str = pydantic.Field(
         validation_alias=pydantic.AliasPath("relationships", "reward", "data", "id")
     )
     creator_id: str = pydantic.Field(
         validation_alias=pydantic.AliasPath("relationships", "creator", "data", "id")
     )
+
+
+class Post(pydantic.BaseModel):
+    id: str
+    type: Literal["post"]
+    # Strict parsing to surface any unexpected post types. New types need screening to avoid missing any downloadable.
+    # If you encounter crash here, please open an issue. Remove this line to suppress the error.
+    post_type: Literal[
+        "link", "text_only", "image_file", "video_external_file", "video_embed", "poll"
+    ] = pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "post_type"))
+    # `link` and `video_embed` posts have embed url.
+    embed_url: Annotated[
+        str | None,
+        pydantic.Field(
+            validation_alias=pydantic.AliasPath("attributes", "embed", "url")
+        ),
+    ] = None
+
+
+class Media(pydantic.BaseModel):
+    id: str
+    type: Literal["media"]
+    attributes: Attributes
+
+    class Attributes(pydantic.BaseModel):
+        # Steaming media application/x-mpegURL as null size.
+        size_bytes: int | None
+        mimetype: str
+        media_type: str | None
+        download_url: str | None
+        image_urls: ImageURLs | None
+
+        class ImageURLs(pydantic.BaseModel):
+            # priority 0
+            original: str | None = None
+            # priority 1
+            default: str | None = None
+            # not used
+            default_small: str | None = None
+
+        display: Display | None
+
+        class Display(pydantic.BaseModel):
+            url: str | None = None
 
 
 class Session:
@@ -161,6 +212,12 @@ class Patreon:
         @property
         def amount_cent(self) -> int:
             return self.pledge.amount_cents
+
+        @property
+        def post_link(self) -> str:
+            return Endpoint.posts(
+                campaign_id=self.campaign.id, patron_id=self.pledge.patron_id
+            )
 
     def __init__(self, auth: AuthInfo):
         self.session = Session(auth)
@@ -228,6 +285,26 @@ class Patreon:
             )
         return pledges
 
+    async def get_posts(
+        self, pledge: Pledge
+    ) -> AsyncGenerator[Tuple[list[Post], list[Media]]]:
+        link = pledge.post_link
+        while link:
+            response = await self.session.get(link)
+            data = await response.json()
+            posts = [
+                Post.model_validate(entity)
+                for entity in data["data"]
+                if entity["type"] == "post"
+            ]
+            medias = [
+                Media.model_validate(entity)
+                for entity in data["included"]
+                if entity["type"] == "media"
+            ]
+            link = data.get("links", {}).get("next")
+            yield posts, medias
+
 
 async def async_main():
     config_file_path = "config.json"
@@ -239,6 +316,8 @@ async def async_main():
         print("Subscribed to:")
         for pledge in patreon.get_pledges():
             print(f"${pledge.amount_cent / 100.0:>7.2f} {pledge.creator_name}")
+            async for posts, medias in patreon.get_posts(pledge):
+                print(f"Found {len(posts)} posts and {len(medias)} media items")
 
 
 def main():
