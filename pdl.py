@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, AsyncGenerator, Literal, Tuple
+from urllib.parse import urlparse
 
 import asyncio
 
@@ -172,13 +174,23 @@ class Media(pydantic.BaseModel):
             original: str | None = None
             # priority 1
             default: str | None = None
-            # not used
+            # lower qualify than download_url, not used
             default_small: str | None = None
 
         display: Display | None
 
         class Display(pydantic.BaseModel):
             url: str | None = None
+
+    def get_download_url(self) -> str | None:
+        if self.attributes.image_urls is None:
+            return self.attributes.download_url
+        return self.attributes.image_urls.original or self.attributes.image_urls.default
+
+    def get_stream_url(self) -> str | None:
+        if self.attributes.display is None:
+            return None
+        return self.attributes.display.url
 
 
 class Session:
@@ -329,19 +341,55 @@ class Patreon:
             link = data.get("links", {}).get("next")
             yield posts, medias
 
+    async def _download_file(self, url: str, filepath: Path):
+        response = await self.session.get(url)
+        response.raise_for_status()
+        with open(filepath, "wb") as f:
+            async for chunk in response.content.iter_chunked(8192):
+                f.write(chunk)
+
+    async def download_medias(self, medias: list[Media], dest_dir: Path):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # Prepare download coroutines
+        coroutines = []
+        for media in medias:
+            url = media.get_download_url()
+            # Skip if no downloadable url
+            if url is None:
+                continue
+
+            extension = Path(urlparse(url).path).suffix or ".bin"
+            filename = f"{media.id}{extension}"
+            filepath = dest_dir / filename
+            # Skip if file already exists
+            if filepath.exists():
+                continue
+
+            coroutines.append(self._download_file(url, filepath))
+        # Execute all downloads concurrently
+        if coroutines:
+            await asyncio.gather(*coroutines)
+
+    async def download_post_embed(self, post: Post, dest_dir: str):
+        pass
+
 
 async def async_main():
     config_file_path = "config.json"
     with open(config_file_path, "r") as f:
         auth = AuthInfo.model_validate_json(f.read())
-    async with Patreon(auth) as patreon:
-        user = await patreon.login()
+    async with Patreon(auth) as api:
+        user = await api.login()
         print(f"Logged in as {user.full_name}")
         print("Subscribed to:")
-        for pledge in patreon.get_pledges():
+        for pledge in api.get_pledges():
             print(f"${pledge.amount_cent / 100.0:>7.2f} {pledge.creator_name}")
-            async for posts, medias in patreon.get_posts(pledge):
+            async for posts, medias in api.get_posts(pledge):
                 print(f"Found {len(posts)} posts and {len(medias)} media items")
+                await api.download_medias(
+                    medias, Path("downloads") / pledge.creator_name
+                )
 
 
 def main():
