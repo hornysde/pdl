@@ -144,6 +144,7 @@ class Post(pydantic.BaseModel):
             "video_external_file",
             "video_embed",
             "poll",
+            "audio_file",
         ],
         pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "post_type")),
     ]
