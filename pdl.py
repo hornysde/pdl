@@ -9,6 +9,7 @@ import asyncio
 
 import aiohttp
 import pydantic
+import pyffmpeg  #  type: ignore
 import tenacity
 
 
@@ -145,6 +146,7 @@ class Post(pydantic.BaseModel):
             "video_embed",
             "poll",
             "audio_file",
+            "podcast",
         ],
         pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "post_type")),
     ]
@@ -165,7 +167,7 @@ class Media(pydantic.BaseModel):
     class Attributes(pydantic.BaseModel):
         # Steaming media application/x-mpegURL as null size.
         size_bytes: int | None
-        mimetype: str
+        mimetype: str | None
         media_type: str | None
         download_url: str | None
         image_urls: ImageURLs | None
@@ -186,9 +188,15 @@ class Media(pydantic.BaseModel):
     def get_download_url(self) -> str | None:
         if self.attributes.image_urls is None:
             return self.attributes.download_url
-        return self.attributes.image_urls.original or self.attributes.image_urls.default
+        return (
+            self.attributes.image_urls.original
+            or self.attributes.image_urls.default
+            or self.attributes.download_url
+        )
 
     def get_stream_url(self) -> str | None:
+        if self.get_download_url() is not None:
+            return None
         if self.attributes.display is None:
             return None
         return self.attributes.display.url
@@ -372,6 +380,35 @@ class Patreon:
         if coroutines:
             await asyncio.gather(*coroutines)
 
+    async def save_stream_media(self, media: Media, dest_dir: Path):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        stream_url = media.get_stream_url()
+        # Skip if no stream url
+        if stream_url is None:
+            return
+
+        filename = f"{media.id}.mp4"
+        filepath = dest_dir / filename
+        # Skip if file already exists
+        if filepath.exists():
+            return
+
+        # Use pyffmpeg to download m3u8 stream
+        ffmpeg = pyffmpeg.FFmpeg()
+        ffmpeg.options(
+            [
+                "-headers",
+                f'"referer: {Endpoint.site}"',
+                "-i",
+                stream_url,
+                "-c",
+                "copy",
+                "-y",
+                f'"{str(filepath)}"',
+            ]
+        )
+
     async def download_post_embed(self, post: Post, dest_dir: str):
         pass
 
@@ -388,9 +425,10 @@ async def async_main():
             print(f"${pledge.amount_cent / 100.0:>7.2f} {pledge.creator_name}")
             async for posts, medias in api.get_posts(pledge):
                 print(f"Found {len(posts)} posts and {len(medias)} media items")
-                await api.download_medias(
-                    medias, Path("downloads") / pledge.creator_name
-                )
+                save_dir = Path("downloads") / pledge.creator_name
+                for media in medias:
+                    await api.save_stream_media(media, save_dir)
+                await api.download_medias(medias, save_dir)
 
 
 def main():

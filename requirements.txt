@@ -32,6 +32,8 @@ pydantic==2.11.7
     # via pdl (pyproject.toml)
 pydantic-core==2.33.2
     # via pydantic
+pyffmpeg==2.5.0.11
+    # via pdl (pyproject.toml)
 tenacity==9.1.2
     # via pdl (pyproject.toml)
 typing-extensions==4.14.1
