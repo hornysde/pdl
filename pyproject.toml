@@ -24,5 +24,8 @@ dev = [
     "mypy",
 ]
 
+[tool.setuptools]
+py-modules = ["pdl"]
+
 [project.scripts]
 pdl = "pdl:main"
