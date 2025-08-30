@@ -9,8 +9,9 @@ import asyncio
 
 import aiohttp
 import pydantic
-import pyffmpeg  #  type: ignore
+import pyffmpeg  # type: ignore[import-untyped]
 import tenacity
+import yt_dlp  # type: ignore[import-untyped]
 
 
 class Endpoint:
@@ -220,7 +221,7 @@ class Session:
         await self.session.close()
         self.session = None
 
-    def make_headers(self, url: str) -> dict[str, str]:
+    def make_headers(self) -> dict[str, str]:
         headers = {
             "referer": Endpoint.site,
             "accept": "*/*",
@@ -237,7 +238,7 @@ class Session:
     )
     async def get(self, url: str) -> aiohttp.ClientResponse:
         assert self.session is not None
-        response = await self.session.get(url, headers=self.make_headers(url))
+        response = await self.session.get(url, headers=self.make_headers())
         # Retry on server errors
         if response.status in [429, 502, 503, 504]:
             response.raise_for_status()
@@ -383,7 +384,7 @@ class Patreon:
         if coroutines:
             await asyncio.gather(*coroutines)
 
-    async def save_stream_media(self, media: Media, dest_dir: Path):
+    def save_stream_media(self, media: Media, dest_dir: Path):
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         stream_url = media.get_stream_url()
@@ -412,8 +413,40 @@ class Patreon:
             ]
         )
 
-    async def download_post_embed(self, post: Post, dest_dir: str):
-        pass
+
+class EmbedDownloader:
+    def __init__(self):
+        ydl_opts = {
+            "cookiesfrombrowser": ("chrome",),
+            "ffmpeg_location": pyffmpeg.FFmpeg().get_ffmpeg_bin(),
+            "format": "bestvideo+bestaudio",
+            "concurrent_fragment_downloads": 10,
+        }
+        # Persist yt_dlp session so that it only prompts for cookie release once.
+        self.dl = yt_dlp.YoutubeDL(ydl_opts)
+        self.dir_to_ids: dict[str, set[str]] = {}
+
+    def is_downloaded(self, post: Post, dest_dir: Path) -> bool:
+        if not dest_dir.exists():
+            return False
+        if str(dest_dir) not in self.dir_to_ids:
+            self.dir_to_ids[str(dest_dir)] = {
+                f.stem for f in dest_dir.iterdir() if f.is_file()
+            }
+        downloaded_ids = self.dir_to_ids[str(dest_dir)]
+        return post.id in downloaded_ids
+
+    def save_post_embed(self, post: Post, dest_dir: Path):
+        if post.embed_url is None:
+            return
+        if self.is_downloaded(post, dest_dir):
+            return
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        self.dl.params["outtmpl"] = {"default": f"{dest_dir / post.id}.%(ext)s"}
+        try:
+            self.dl.download([post.embed_url])
+        except yt_dlp.utils.DownloadError as e:
+            print(f"Failed to download embed for post {post.id}: {e}")
 
 
 async def async_main():
@@ -423,6 +456,7 @@ async def async_main():
     async with Patreon(auth) as api:
         user = await api.login()
         print(f"Logged in as {user.full_name}")
+        embed_downloader = EmbedDownloader()
         print("Subscribed to:")
         for pledge in api.get_pledges():
             print(f"${pledge.amount_cent / 100.0:>7.2f} {pledge.creator_name}")
@@ -430,8 +464,10 @@ async def async_main():
                 print(f"Found {len(posts)} posts and {len(medias)} media items")
                 save_dir = Path("downloads") / pledge.creator_name
                 for media in medias:
-                    await api.save_stream_media(media, save_dir)
+                    api.save_stream_media(media, save_dir)
                 await api.download_medias(medias, save_dir)
+                for post in posts:
+                    embed_downloader.save_post_embed(post, save_dir)
 
 
 def main():

@@ -15,6 +15,7 @@ dependencies = [
     "pydantic",
     "pyffmpeg",
     "tenacity",
+    "yt-dlp",
 ]
 
 [project.optional-dependencies]
