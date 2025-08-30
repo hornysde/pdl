@@ -348,7 +348,7 @@ class Patreon:
             ]
             medias = [
                 Media.model_validate(entity)
-                for entity in data["included"]
+                for entity in data.get("included", [])
                 if entity["type"] == "media"
             ]
             link = data.get("links", {}).get("next")
