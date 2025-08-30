@@ -52,6 +52,9 @@ class Campaign(pydantic.BaseModel):
 
     type: Literal["campaign"]
     id: str
+    name: Annotated[
+        str, pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "name"))
+    ]
 
 
 class Reward(pydantic.BaseModel):
@@ -252,7 +255,7 @@ class Patreon:
 
         @property
         def creator_name(self) -> str:
-            return self.creator.full_name
+            return self.campaign.name
 
         @property
         def amount_cent(self) -> int:
