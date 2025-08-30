@@ -30,3 +30,6 @@ py-modules = ["pdl"]
 
 [project.scripts]
 pdl = "pdl:main"
+
+[tool.mypy]
+check_untyped_defs = true
