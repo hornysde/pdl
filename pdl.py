@@ -6,6 +6,7 @@ from typing import Annotated, AsyncGenerator, Literal, Tuple
 from urllib.parse import urlparse
 
 import asyncio
+import logging
 
 import aiohttp
 import pydantic
@@ -421,6 +422,8 @@ class EmbedDownloader:
             "ffmpeg_location": pyffmpeg.FFmpeg().get_ffmpeg_bin(),
             "format": "bestvideo+bestaudio",
             "concurrent_fragment_downloads": 10,
+            "quiet": True,
+            "no_warnings": True,
         }
         # Persist yt_dlp session so that it only prompts for cookie release once.
         self.dl = yt_dlp.YoutubeDL(ydl_opts)
@@ -450,6 +453,9 @@ class EmbedDownloader:
 
 
 async def async_main():
+    # Shut pyffmpeg up
+    logging.getLogger("pyffmpeg").handlers = []
+
     config_file_path = "config.json"
     with open(config_file_path, "r") as f:
         auth = AuthInfo.model_validate_json(f.read())
