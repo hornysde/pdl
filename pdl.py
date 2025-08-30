@@ -372,7 +372,7 @@ class Patreon:
             if url is None:
                 continue
 
-            extension = Path(urlparse(url).path).suffix or ".bin"
+            extension = Path(urlparse(url).path).suffix or ""
             filename = f"{media.id}{extension}"
             filepath = dest_dir / filename
             # Skip if file already exists
@@ -460,6 +460,7 @@ async def async_main():
         print("Subscribed to:")
         for pledge in api.get_pledges():
             print(f"${pledge.amount_cent / 100.0:>7.2f} {pledge.creator_name}")
+            print(f"Total post: {pledge.reward.post_count}")
             async for posts, medias in api.get_posts(pledge):
                 print(f"Found {len(posts)} posts and {len(medias)} media items")
                 save_dir = Path("downloads") / pledge.creator_name
