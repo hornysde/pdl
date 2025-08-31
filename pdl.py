@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Annotated, AsyncGenerator, Literal, Tuple
 from urllib.parse import urlparse
 
+import argparse
 import asyncio
 import logging
 
@@ -423,9 +424,9 @@ def save_stream_media(media: Media, dest_dir: Path) -> bool:
 
 
 class EmbedDownloader:
-    def __init__(self):
+    def __init__(self, browser: str):
         ydl_opts = {
-            "cookiesfrombrowser": ("chrome",),
+            "cookiesfrombrowser": (browser,),
             "ffmpeg_location": pyffmpeg.FFmpeg().get_ffmpeg_bin(),
             "format": "bestvideo+bestaudio",
             "concurrent_fragment_downloads": 10,
@@ -463,7 +464,7 @@ class EmbedDownloader:
 
 async def download_pledge(
     api: Patreon,
-    embed_downloader: EmbedDownloader,
+    embed_downloader: EmbedDownloader | None,
     pledge: Patreon.Pledge,
     download_dir: Path,
 ):
@@ -476,8 +477,8 @@ async def download_pledge(
             all_medias.extend(medias)
             progress.update(len(posts))
 
-    def print_download_stat(name: str, count: int, total: int):
-        print(f"{name:<15} {count:>5}/{total}")
+    def print_download_stat(name: str, count: int | str, total: int):
+        print(f"{name:<12} {count:>5}/{total}")
 
     # Save downloadable medias
     downloadable_medias = [
@@ -508,6 +509,9 @@ async def download_pledge(
 
     # Save embedded medias
     embedded_posts = [post for post in all_posts if post.embed_url is not None]
+    if embed_downloader is None:
+        print_download_stat("embedded", "skip", len(embedded_posts))
+        return
     with tqdm.tqdm(
         desc="Embedded media", total=len(embedded_posts), unit="file", leave=False
     ) as progress:
@@ -523,15 +527,33 @@ async def async_main():
     # Shut pyffmpeg up
     logging.getLogger("pyffmpeg").handlers = []
 
-    config_file_path = "config.json"
-    with open(config_file_path, "r") as f:
+    parser = argparse.ArgumentParser(description="Brutally simple Patreon downloader.")
+    parser.add_argument(
+        "--config",
+        default="config.json",
+        help="Config file path (default: config.json)",
+    )
+    parser.add_argument(
+        "--output", default="downloads", help="Download directory (default: downloads)"
+    )
+    SKIP_EMBED = "none"
+    parser.add_argument(
+        "--browser",
+        default="chrome",
+        help=f"Browser to extract cookies from for yt-dlp (default: chrome). Use '{SKIP_EMBED}' to skip embed downloads.",
+    )
+    args = parser.parse_args()
+
+    with open(args.config, "r") as f:
         auth = AuthInfo.model_validate_json(f.read())
     async with Patreon(auth) as api:
         user = await api.login()
         print(f"Logged in as {user.full_name}")
-        embed_downloader = EmbedDownloader()
+        embed_downloader = (
+            EmbedDownloader(args.browser) if args.browser != SKIP_EMBED else None
+        )
         for pledge in api.get_pledges():
-            download_dir = Path("downloads") / pledge.creator_name
+            download_dir = Path(args.output) / pledge.creator_name
             print(f"${pledge.amount_cent / 100.0:>7.2f} {pledge.creator_name}")
             await download_pledge(api, embed_downloader, pledge, download_dir)
 
