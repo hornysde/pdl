@@ -12,6 +12,7 @@ import aiohttp
 import pydantic
 import pyffmpeg  # type: ignore[import-untyped]
 import tenacity
+import tqdm
 import yt_dlp  # type: ignore[import-untyped]
 
 
@@ -355,14 +356,17 @@ class Patreon:
             link = data.get("links", {}).get("next")
             yield posts, medias
 
-    async def _download_file(self, url: str, filepath: Path):
+    async def _download_file(self, url: str, filepath: Path, progress: tqdm.tqdm):
         response = await self.session.get(url)
         response.raise_for_status()
         with open(filepath, "wb") as f:
             async for chunk in response.content.iter_chunked(8192):
                 f.write(chunk)
+        progress.update()
 
-    async def download_medias(self, medias: list[Media], dest_dir: Path):
+    async def download_medias(
+        self, medias: list[Media], dest_dir: Path, progress: tqdm.tqdm
+    ):
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         # Prepare download coroutines
@@ -380,7 +384,7 @@ class Patreon:
             if filepath.exists():
                 continue
 
-            coroutines.append(self._download_file(url, filepath))
+            coroutines.append(self._download_file(url, filepath, progress))
         # Execute all downloads concurrently
         if coroutines:
             await asyncio.gather(*coroutines)
@@ -425,6 +429,7 @@ class EmbedDownloader:
             "concurrent_fragment_downloads": 10,
             "quiet": True,
             "no_warnings": True,
+            "noprogress": True,
         }
         # Persist yt_dlp session so that it only prompts for cookie release once.
         self.dl = yt_dlp.YoutubeDL(ydl_opts)
@@ -459,28 +464,46 @@ async def download_pledge(
     pledge: Patreon.Pledge,
     download_dir: Path,
 ):
-    async for posts, medias in api.get_posts(pledge):
-        print(f"Found {len(posts)} posts and {len(medias)} media items")
+    # Index all posts
+    all_posts = []
+    all_medias = []
+    with tqdm.tqdm(desc="Indexing", unit="post", leave=False) as progress:
+        async for posts, medias in api.get_posts(pledge):
+            all_posts.extend(posts)
+            all_medias.extend(medias)
+            progress.update(len(posts))
 
-        # Gather all media
-        downloadable_medias = [
-            media for media in medias if media.get_download_url() is not None
-        ]
-        streaming_medias = [
-            media for media in medias if media.get_stream_url() is not None
-        ]
-        embedded_posts = [post for post in posts if post.embed_url is not None]
+    # Save downloadable medias
+    downloadable_medias = [
+        media for media in all_medias if media.get_download_url() is not None
+    ]
+    with tqdm.tqdm(
+        desc="Downloadable media",
+        total=len(downloadable_medias),
+        unit="file",
+        leave=False,
+    ) as progress:
+        await api.download_medias(downloadable_medias, download_dir, progress)
 
-        # Save downloadable media
-        await api.download_medias(downloadable_medias, download_dir)
-
-        # Save streaming media
+    # Save streaming medias
+    streaming_medias = [
+        media for media in all_medias if media.get_stream_url() is not None
+    ]
+    with tqdm.tqdm(
+        desc="Streaming media", total=len(streaming_medias), unit="file", leave=False
+    ) as progress:
         for media in streaming_medias:
             save_stream_media(media, download_dir)
+            progress.update()
 
-        # Save embedded media
+    # Save embedded medias
+    embedded_posts = [post for post in all_posts if post.embed_url is not None]
+    with tqdm.tqdm(
+        desc="Embedded media", total=len(embedded_posts), unit="file", leave=False
+    ) as progress:
         for post in embedded_posts:
             embed_downloader.save_post_embed(post, download_dir)
+            progress.update()
 
 
 async def async_main():
