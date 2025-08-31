@@ -366,7 +366,7 @@ class Patreon:
 
     async def download_medias(
         self, medias: list[Media], dest_dir: Path, progress: tqdm.tqdm
-    ):
+    ) -> int:
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         # Prepare download coroutines
@@ -388,21 +388,22 @@ class Patreon:
         # Execute all downloads concurrently
         if coroutines:
             await asyncio.gather(*coroutines)
+        return len(coroutines)
 
 
-def save_stream_media(media: Media, dest_dir: Path):
+def save_stream_media(media: Media, dest_dir: Path) -> bool:
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     stream_url = media.get_stream_url()
     # Skip if no stream url
     if stream_url is None:
-        return
+        return False
 
     filename = f"{media.id}.mp4"
     filepath = dest_dir / filename
     # Skip if file already exists
     if filepath.exists():
-        return
+        return False
 
     # Use pyffmpeg to download m3u8 stream
     ffmpeg = pyffmpeg.FFmpeg()
@@ -418,6 +419,7 @@ def save_stream_media(media: Media, dest_dir: Path):
             f'"{str(filepath)}"',
         ]
     )
+    return True
 
 
 class EmbedDownloader:
@@ -445,17 +447,18 @@ class EmbedDownloader:
         downloaded_ids = self.dir_to_ids[str(dest_dir)]
         return post.id in downloaded_ids
 
-    def save_post_embed(self, post: Post, dest_dir: Path):
+    def save_post_embed(self, post: Post, dest_dir: Path) -> bool:
         if post.embed_url is None:
-            return
+            return False
         if self.is_downloaded(post, dest_dir):
-            return
+            return False
         dest_dir.mkdir(parents=True, exist_ok=True)
         self.dl.params["outtmpl"] = {"default": f"{dest_dir / post.id}.%(ext)s"}
         try:
             self.dl.download([post.embed_url])
         except yt_dlp.utils.DownloadError as e:
             print(f"Failed to download embed for post {post.id}: {e}")
+        return True
 
 
 async def download_pledge(
@@ -473,6 +476,9 @@ async def download_pledge(
             all_medias.extend(medias)
             progress.update(len(posts))
 
+    def print_download_stat(name: str, count: int, total: int):
+        print(f"{name:<15} {count:>5}/{total}")
+
     # Save downloadable medias
     downloadable_medias = [
         media for media in all_medias if media.get_download_url() is not None
@@ -483,7 +489,8 @@ async def download_pledge(
         unit="file",
         leave=False,
     ) as progress:
-        await api.download_medias(downloadable_medias, download_dir, progress)
+        count = await api.download_medias(downloadable_medias, download_dir, progress)
+    print_download_stat("downloadable", count, len(downloadable_medias))
 
     # Save streaming medias
     streaming_medias = [
@@ -492,18 +499,24 @@ async def download_pledge(
     with tqdm.tqdm(
         desc="Streaming media", total=len(streaming_medias), unit="file", leave=False
     ) as progress:
+        count = 0
         for media in streaming_medias:
-            save_stream_media(media, download_dir)
+            if save_stream_media(media, download_dir):
+                count += 1
             progress.update()
+    print_download_stat("streaming", count, len(streaming_medias))
 
     # Save embedded medias
     embedded_posts = [post for post in all_posts if post.embed_url is not None]
     with tqdm.tqdm(
         desc="Embedded media", total=len(embedded_posts), unit="file", leave=False
     ) as progress:
+        count = 0
         for post in embedded_posts:
-            embed_downloader.save_post_embed(post, download_dir)
+            if embed_downloader.save_post_embed(post, download_dir):
+                count += 1
             progress.update()
+    print_download_stat("embedded", count, len(embedded_posts))
 
 
 async def async_main():
@@ -517,7 +530,6 @@ async def async_main():
         user = await api.login()
         print(f"Logged in as {user.full_name}")
         embed_downloader = EmbedDownloader()
-        print("Subscribed to:")
         for pledge in api.get_pledges():
             download_dir = Path("downloads") / pledge.creator_name
             print(f"${pledge.amount_cent / 100.0:>7.2f} {pledge.creator_name}")
