@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import argparse
 import asyncio
 import logging
+import re
 
 import aiohttp
 import pydantic
@@ -164,6 +165,28 @@ class Post(pydantic.BaseModel):
             validation_alias=pydantic.AliasPath("attributes", "embed", "url")
         ),
     ] = None
+    url: Annotated[
+        str, pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "url"))
+    ]
+    iframe_src: Annotated[
+        str | None,
+        pydantic.Field(
+            validation_alias=pydantic.AliasPath("attributes", "embed", "html")
+        ),
+    ] = None
+
+    @pydantic.field_validator("iframe_src", mode="before")
+    @classmethod
+    def parse_iframe_src(cls, value: str | None):
+        if not value:
+            return None
+        # Extract src attribute from iframe HTML string
+        iframe_match = re.search(
+            r'<iframe[^>]*src=["\']([^"\']*)["\']', value, re.IGNORECASE
+        )
+        if iframe_match:
+            return iframe_match.group(1)
+        return None
 
 
 class Media(pydantic.BaseModel):
@@ -425,14 +448,29 @@ def save_stream_media(media: Media, dest_dir: Path) -> bool:
 
 class EmbedDownloader:
     def __init__(self, browser: str):
+        class SilentLogger:
+            def debug(self, msg):
+                pass
+
+            def warning(self, msg):
+                pass
+
+            def error(self, msg):
+                pass
+
         ydl_opts = {
             "cookiesfrombrowser": (browser,),
             "ffmpeg_location": pyffmpeg.FFmpeg().get_ffmpeg_bin(),
-            "format": "bestvideo+bestaudio",
+            # Accept best quality adaptive and progressive formats
+            "format": "bestvideo*+bestaudio/best",
             "concurrent_fragment_downloads": 10,
+            "logger": SilentLogger(),
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
+            "http_headers": {
+                "referer": Endpoint.site,
+            },
         }
         # Persist yt_dlp session so that it only prompts for cookie release once.
         self.dl = yt_dlp.YoutubeDL(ydl_opts)
@@ -455,11 +493,21 @@ class EmbedDownloader:
             return False
         dest_dir.mkdir(parents=True, exist_ok=True)
         self.dl.params["outtmpl"] = {"default": f"{dest_dir / post.id}.%(ext)s"}
-        try:
-            self.dl.download([post.embed_url])
-        except yt_dlp.utils.DownloadError as e:
-            print(f"Failed to download embed for post {post.id}: {e}")
-        return True
+
+        # Video provider behavior differs. Try all urls to improve robustness.
+        urls = [post.embed_url, post.url]
+        if post.iframe_src is not None:
+            urls.append(post.iframe_src)
+        errors: list[str] = []
+        for url in urls:
+            try:
+                self.dl.download([url])
+                return True
+            except yt_dlp.utils.DownloadError as e:
+                errors.append(url)
+                errors.append(str(e))
+        print("\n".join(errors))
+        return False
 
 
 async def download_pledge(
