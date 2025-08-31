@@ -447,7 +447,7 @@ def save_stream_media(media: Media, dest_dir: Path) -> bool:
 
 
 class EmbedDownloader:
-    def __init__(self, browser: str):
+    def __init__(self, browser: str | None):
         class SilentLogger:
             def debug(self, msg):
                 pass
@@ -459,7 +459,7 @@ class EmbedDownloader:
                 pass
 
         ydl_opts = {
-            "cookiesfrombrowser": (browser,),
+            "cookiesfrombrowser": (browser,) if browser else None,
             "ffmpeg_location": pyffmpeg.FFmpeg().get_ffmpeg_bin(),
             # Accept best quality adaptive and progressive formats
             "format": "bestvideo*+bestaudio/best",
@@ -512,7 +512,7 @@ class EmbedDownloader:
 
 async def download_pledge(
     api: Patreon,
-    embed_downloader: EmbedDownloader | None,
+    embed_downloader: EmbedDownloader,
     pledge: Patreon.Pledge,
     download_dir: Path,
 ):
@@ -557,9 +557,6 @@ async def download_pledge(
 
     # Save embedded medias
     embedded_posts = [post for post in all_posts if post.embed_url is not None]
-    if embed_downloader is None:
-        print_download_stat("embedded", "skip", len(embedded_posts))
-        return
     with tqdm.tqdm(
         desc="Embedded media", total=len(embedded_posts), unit="file", leave=False
     ) as progress:
@@ -584,11 +581,10 @@ async def async_main():
     parser.add_argument(
         "--output", default="downloads", help="Download directory (default: downloads)"
     )
-    SKIP_EMBED = "none"
     parser.add_argument(
         "--browser",
-        default="chrome",
-        help=f"Browser to extract cookies from for yt-dlp (default: chrome). Use '{SKIP_EMBED}' to skip embed downloads.",
+        default=None,
+        help="Browser to extract cookies from for yt-dlp (default: None).",
     )
     args = parser.parse_args()
 
@@ -597,9 +593,7 @@ async def async_main():
     async with Patreon(auth) as api:
         user = await api.login()
         print(f"Logged in as {user.full_name}")
-        embed_downloader = (
-            EmbedDownloader(args.browser) if args.browser != SKIP_EMBED else None
-        )
+        embed_downloader = EmbedDownloader(args.browser)
         for pledge in api.get_pledges():
             download_dir = Path(args.output) / pledge.creator_name
             print(f"${pledge.amount_cent / 100.0:>7.2f} {pledge.creator_name}")
