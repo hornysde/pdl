@@ -385,34 +385,35 @@ class Patreon:
         if coroutines:
             await asyncio.gather(*coroutines)
 
-    def save_stream_media(self, media: Media, dest_dir: Path):
-        dest_dir.mkdir(parents=True, exist_ok=True)
 
-        stream_url = media.get_stream_url()
-        # Skip if no stream url
-        if stream_url is None:
-            return
+def save_stream_media(media: Media, dest_dir: Path):
+    dest_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = f"{media.id}.mp4"
-        filepath = dest_dir / filename
-        # Skip if file already exists
-        if filepath.exists():
-            return
+    stream_url = media.get_stream_url()
+    # Skip if no stream url
+    if stream_url is None:
+        return
 
-        # Use pyffmpeg to download m3u8 stream
-        ffmpeg = pyffmpeg.FFmpeg()
-        ffmpeg.options(
-            [
-                "-headers",
-                f'"referer: {Endpoint.site}"',
-                "-i",
-                stream_url,
-                "-c",
-                "copy",
-                "-y",
-                f'"{str(filepath)}"',
-            ]
-        )
+    filename = f"{media.id}.mp4"
+    filepath = dest_dir / filename
+    # Skip if file already exists
+    if filepath.exists():
+        return
+
+    # Use pyffmpeg to download m3u8 stream
+    ffmpeg = pyffmpeg.FFmpeg()
+    ffmpeg.options(
+        [
+            "-headers",
+            f'"referer: {Endpoint.site}"',
+            "-i",
+            stream_url,
+            "-c",
+            "copy",
+            "-y",
+            f'"{str(filepath)}"',
+        ]
+    )
 
 
 class EmbedDownloader:
@@ -452,6 +453,36 @@ class EmbedDownloader:
             print(f"Failed to download embed for post {post.id}: {e}")
 
 
+async def download_pledge(
+    api: Patreon,
+    embed_downloader: EmbedDownloader,
+    pledge: Patreon.Pledge,
+    download_dir: Path,
+):
+    async for posts, medias in api.get_posts(pledge):
+        print(f"Found {len(posts)} posts and {len(medias)} media items")
+
+        # Gather all media
+        downloadable_medias = [
+            media for media in medias if media.get_download_url() is not None
+        ]
+        streaming_medias = [
+            media for media in medias if media.get_stream_url() is not None
+        ]
+        embedded_posts = [post for post in posts if post.embed_url is not None]
+
+        # Save downloadable media
+        await api.download_medias(downloadable_medias, download_dir)
+
+        # Save streaming media
+        for media in streaming_medias:
+            save_stream_media(media, download_dir)
+
+        # Save embedded media
+        for post in embedded_posts:
+            embed_downloader.save_post_embed(post, download_dir)
+
+
 async def async_main():
     # Shut pyffmpeg up
     logging.getLogger("pyffmpeg").handlers = []
@@ -465,16 +496,9 @@ async def async_main():
         embed_downloader = EmbedDownloader()
         print("Subscribed to:")
         for pledge in api.get_pledges():
+            download_dir = Path("downloads") / pledge.creator_name
             print(f"${pledge.amount_cent / 100.0:>7.2f} {pledge.creator_name}")
-            print(f"Total post: {pledge.reward.post_count}")
-            async for posts, medias in api.get_posts(pledge):
-                print(f"Found {len(posts)} posts and {len(medias)} media items")
-                save_dir = Path("downloads") / pledge.creator_name
-                for media in medias:
-                    api.save_stream_media(media, save_dir)
-                await api.download_medias(medias, save_dir)
-                for post in posts:
-                    embed_downloader.save_post_embed(post, save_dir)
+            await download_pledge(api, embed_downloader, pledge, download_dir)
 
 
 def main():
