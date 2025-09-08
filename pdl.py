@@ -259,8 +259,8 @@ class Session:
     async def get(self, url: str) -> aiohttp.ClientResponse:
         assert self.session is not None
         response = await self.session.get(url, headers=self.make_headers())
-        # Retry on server errors
-        if response.status in [429, 502, 503, 504]:
+        # Retry on server errors.
+        if response.status == 429 or response.status >= 500:
             response.raise_for_status()
 
         return response
@@ -374,13 +374,34 @@ class Patreon:
             link = data.get("links", {}).get("next")
             yield posts, medias
 
-    async def _download_file(self, url: str, filepath: Path, progress: tqdm.tqdm):
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(5),
+        wait=tenacity.wait_exponential(multiplier=1, min=1, max=10),
+        retry=tenacity.retry_if_exception_type(Exception),
+        retry_error_callback=lambda _: False,
+    )
+    async def _download_file(
+        self, url: str, filepath: Path, progress: tqdm.tqdm
+    ) -> bool:
         response = await self.session.get(url)
-        response.raise_for_status()
-        with open(filepath, "wb") as f:
-            async for chunk in response.content.iter_chunked(8192):
-                f.write(chunk)
+        # Skip on client error (403, 404 etc.)
+        try:
+            response.raise_for_status()
+        except Exception:
+            progress.update()
+            return False
+        try:
+            with open(filepath, "wb") as f:
+                async for chunk in response.content.iter_chunked(8192):
+                    f.write(chunk)
+        except Exception:
+            # Remove half written file.
+            if filepath.exists():
+                filepath.unlink()
+            response.close()
+            raise
         progress.update()
+        return True
 
     async def download_medias(
         self, medias: list[Media], dest_dir: Path, progress: tqdm.tqdm
@@ -393,6 +414,7 @@ class Patreon:
             url = media.get_download_url()
             # Skip if no downloadable url
             if url is None:
+                progress.update()
                 continue
 
             extension = Path(urlparse(url).path).suffix or ""
@@ -400,6 +422,7 @@ class Patreon:
             filepath = dest_dir / filename
             # Skip if file already exists
             if filepath.exists():
+                progress.update()
                 continue
 
             coroutines.append(self._download_file(url, filepath, progress))
