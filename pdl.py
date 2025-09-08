@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 import argparse
 import asyncio
+import datetime
 import logging
 import re
 
@@ -27,7 +28,10 @@ class Endpoint:
         return format
 
     site = "https://www.patreon.com"
-    current_user_with_pledges = site + "/api/current_user?include=pledges"
+    current_user_with_memberships = (
+        site
+        + "/api/current_user?include=active_memberships.campaign&fields[member]=currently_entitled_amount_cents,access_expires_at"
+    )
     posts = _formatted(
         site
         + "/api/posts?filter[campaign_id]={campaign_id}&filter[accessible_by_user_id]={patron_id}&include=attachments,attachments_media,media"
@@ -60,22 +64,11 @@ class Campaign(pydantic.BaseModel):
     name: Annotated[
         str, pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "name"))
     ]
-
-
-class Reward(pydantic.BaseModel):
-    """Subscription tier offered by a campaign with price and benefits."""
-
-    type: Literal["reward"]
-    id: str
-    post_count: Annotated[
-        int,
-        pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "post_count")),
-    ]
-    campaign_id: Annotated[
+    creator_id: Annotated[
         str,
         pydantic.Field(
             validation_alias=pydantic.AliasPath(
-                "relationships", "campaign", "data", "id"
+                "relationships", "creator", "data", "id"
             )
         ),
     ]
@@ -94,47 +87,48 @@ class User(pydantic.BaseModel):
         str,
         pydantic.Field(validation_alias=pydantic.AliasPath("attributes", "image_url")),
     ]
-    pledge_ids: Annotated[
+    membership_ids: Annotated[
         list[str],
         pydantic.Field(
-            validation_alias=pydantic.AliasPath("relationships", "pledges", "data")
+            validation_alias=pydantic.AliasPath(
+                "relationships", "active_memberships", "data"
+            )
         ),
     ] = []
 
-    @pydantic.field_validator("pledge_ids", mode="before")
+    @pydantic.field_validator("membership_ids", mode="before")
     @classmethod
-    def _extract_pledge_ids(cls, pledges):
-        return [pledge["id"] for pledge in pledges]
+    def _extract_membership_ids(cls, memberships):
+        return [membership["id"] for membership in memberships]
 
 
-class Pledge(pydantic.BaseModel):
-    """Active subscription/payment from a patron to a creator for a specific reward tier."""
+class Membership(pydantic.BaseModel):
+    """
+    The record of a user's membership to a campaign.
+    https://docs.patreon.com/#member
+    """
 
-    type: Literal["pledge"]
+    type: Literal["member"]
     id: str
-    amount_cents: Annotated[
+    access_expires_at: Annotated[
+        datetime.datetime | None,
+        pydantic.Field(
+            validation_alias=pydantic.AliasPath("attributes", "access_expires_at")
+        ),
+    ]
+    currently_entitled_amount_cents: Annotated[
         int,
         pydantic.Field(
-            validation_alias=pydantic.AliasPath("attributes", "amount_cents")
+            validation_alias=pydantic.AliasPath(
+                "attributes", "currently_entitled_amount_cents"
+            )
         ),
     ]
-    patron_id: Annotated[
-        str,
-        pydantic.Field(
-            validation_alias=pydantic.AliasPath("relationships", "patron", "data", "id")
-        ),
-    ]
-    reward_id: Annotated[
-        str,
-        pydantic.Field(
-            validation_alias=pydantic.AliasPath("relationships", "reward", "data", "id")
-        ),
-    ]
-    creator_id: Annotated[
+    campaign_id: Annotated[
         str,
         pydantic.Field(
             validation_alias=pydantic.AliasPath(
-                "relationships", "creator", "data", "id"
+                "relationships", "campaign", "data", "id"
             )
         ),
     ]
@@ -274,11 +268,10 @@ class Session:
 
 class Patreon:
     @dataclass
-    class Pledge:
-        pledge: Pledge
-        reward: Reward
-        creator: User
+    class Membership:
+        membership: Membership
         campaign: Campaign
+        creator: User
 
         @property
         def creator_name(self) -> str:
@@ -286,21 +279,26 @@ class Patreon:
 
         @property
         def amount_cent(self) -> int:
-            return self.pledge.amount_cents
+            return self.membership.currently_entitled_amount_cents
+
+        @property
+        def expiring_in(self) -> datetime.timedelta | None:
+            if self.membership.access_expires_at is None:
+                return None
+            return self.membership.access_expires_at - datetime.datetime.now(
+                datetime.timezone.utc
+            )
 
         @property
         def post_link(self) -> str:
-            return Endpoint.posts(
-                campaign_id=self.campaign.id, patron_id=self.pledge.patron_id
-            )
+            return Endpoint.posts(campaign_id=self.campaign.id, patron_id=self)
 
     def __init__(self, auth: AuthInfo):
         self.session = Session(auth)
         self.me: User | None = None
-        self.pledges: dict[str, Pledge] = {}
-        self.creators: dict[str, User] = {}
-        self.rewards: dict[str, Reward] = {}
+        self.memberships: dict[str, Membership] = {}
         self.campaigns: dict[str, Campaign] = {}
+        self.creator: dict[str, User] = {}
 
     async def __aenter__(self):
         await self.session.create()
@@ -310,60 +308,56 @@ class Patreon:
         await self.session.close()
 
     async def login(self):
-        response = await self.session.get(Endpoint.current_user_with_pledges)
+        response = await self.session.get(Endpoint.current_user_with_memberships)
         data = await response.json()
         # Get current user
         self.me = User.model_validate(data["data"])
         # Filter out placeholder entity with id "-1"
         entities = [entity for entity in data["included"] if entity["id"] != "-1"]
         # Parse all included entities (not all are relevant to logged in user)
-        self.pledges = {
-            entity["id"]: Pledge.model_validate(entity)
+        self.memberships = {
+            entity["id"]: Membership.model_validate(entity)
             for entity in entities
-            if entity["type"] == "pledge"
-        }
-        self.creators = {
-            entity["id"]: User.model_validate(entity)
-            for entity in entities
-            if entity["type"] == "user"
-        }
-        self.rewards = {
-            entity["id"]: Reward.model_validate(entity)
-            for entity in entities
-            if entity["type"] == "reward"
+            if entity["type"] == "member"
         }
         self.campaigns = {
             entity["id"]: Campaign.model_validate(entity)
             for entity in entities
             if entity["type"] == "campaign"
         }
+        self.creators = {
+            entity["id"]: User.model_validate(entity)
+            for entity in entities
+            if entity["type"] == "user"
+        }
 
         return self.me
 
-    def get_pledges(self) -> list[Patreon.Pledge]:
+    def get_memberships(self) -> list[Patreon.Membership]:
         if self.me is None:
             raise ValueError("Not logged in, call login() first")
 
-        pledges = []
-        for pledge_id in self.me.pledge_ids:
-            pledge = self.pledges[pledge_id]
-            reward = self.rewards[pledge.reward_id]
-            creator = self.creators[pledge.creator_id]
-            campaign = self.campaigns[reward.campaign_id]
-            pledges.append(
-                Patreon.Pledge(
-                    pledge=pledge,
-                    reward=reward,
+        memberships: list[Patreon.Membership] = []
+        for membership_id in self.me.membership_ids:
+            membership = self.memberships[membership_id]
+            campaign = self.campaigns[membership.campaign_id]
+            creator = self.creators[campaign.creator_id]
+            memberships.append(
+                Patreon.Membership(
+                    membership=membership,
                     creator=creator,
                     campaign=campaign,
                 )
             )
-        return pledges
+        return memberships
 
     async def get_posts(
-        self, pledge: Pledge
+        self, membership: Patreon.Membership
     ) -> AsyncGenerator[Tuple[list[Post], list[Media]]]:
-        link = pledge.post_link
+        if self.me is None:
+            raise ValueError("Not logged in, call login() first")
+
+        link = Endpoint.posts(campaign_id=membership.campaign.id, patron_id=self.me.id)
         while link:
             response = await self.session.get(link)
             data = await response.json()
@@ -510,17 +504,17 @@ class EmbedDownloader:
         return False
 
 
-async def download_pledge(
+async def download_membership(
     api: Patreon,
     embed_downloader: EmbedDownloader,
-    pledge: Patreon.Pledge,
+    membership: Patreon.Membership,
     download_dir: Path,
 ):
     # Index all posts
     all_posts = []
     all_medias = []
     with tqdm.tqdm(desc="Indexing", unit="post", leave=False) as progress:
-        async for posts, medias in api.get_posts(pledge):
+        async for posts, medias in api.get_posts(membership):
             all_posts.extend(posts)
             all_medias.extend(medias)
             progress.update(len(posts))
@@ -594,10 +588,13 @@ async def async_main():
         user = await api.login()
         print(f"Logged in as {user.full_name}")
         embed_downloader = EmbedDownloader(args.browser)
-        for pledge in api.get_pledges():
-            download_dir = Path(args.output) / pledge.creator_name
-            print(f"${pledge.amount_cent / 100.0:>7.2f} {pledge.creator_name}")
-            await download_pledge(api, embed_downloader, pledge, download_dir)
+        for membership in api.get_memberships():
+            download_dir = Path(args.output) / membership.creator_name
+            print(f"${membership.amount_cent / 100.0:>7.2f} {membership.creator_name}")
+            if expiring_in := membership.expiring_in:
+                days = expiring_in.days
+                print(f"(Expiring in {days} days)")
+            await download_membership(api, embed_downloader, membership, download_dir)
 
 
 def main():
